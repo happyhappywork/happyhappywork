@@ -1,0 +1,758 @@
+import React, { useState } from 'react';
+import { 
+  MessageCircle, 
+  FileText, 
+  BookOpen, 
+  Heart, 
+  Smile, 
+  Send, 
+  RefreshCw, 
+  ChevronDown, 
+  ChevronUp, 
+  Info,
+  Menu,
+  X,
+  Users,
+  Coffee,
+  Gift,
+  Volume2,
+  Loader2
+} from 'lucide-react';
+
+// --- 共通ユーティリティ: PCM音声をWAV形式に変換して再生するための関数 ---
+const pcmToWav = (base64Pcm, sampleRate) => {
+  const binaryString = atob(base64Pcm);
+  const len = binaryString.length;
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) {
+    bytes[i] = binaryString.charCodeAt(i);
+  }
+
+  const numChannels = 1;
+  const bitsPerSample = 16;
+  const byteRate = sampleRate * numChannels * (bitsPerSample / 8);
+  const blockAlign = numChannels * (bitsPerSample / 8);
+  const dataSize = bytes.length;
+  const buffer = new ArrayBuffer(44 + dataSize);
+  const view = new DataView(buffer);
+
+  const writeString = (view, offset, string) => {
+    for (let i = 0; i < string.length; i++) {
+      view.setUint8(offset + i, string.charCodeAt(i));
+    }
+  };
+
+  writeString(view, 0, 'RIFF');
+  view.setUint32(4, 36 + dataSize, true);
+  writeString(view, 8, 'WAVE');
+  writeString(view, 12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, numChannels, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, byteRate, true);
+  view.setUint16(32, blockAlign, true);
+  view.setUint16(34, bitsPerSample, true);
+  writeString(view, 36, 'data');
+  view.setUint32(40, dataSize, true);
+
+  const dataView = new Uint8Array(buffer, 44);
+  dataView.set(bytes);
+
+  return new Blob([buffer], { type: 'audio/wav' });
+};
+
+// Gemini TTS (Text-to-Speech) API を呼び出して再生する関数
+const playSpeech = async (text, setSpeaking) => {
+  setSpeaking(true);
+  const apiKey = ""; // APIキーは実行環境で自動付与されます
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${apiKey}`;
+
+  const payload = {
+    contents: [{ parts: [{ text: `優しく、思いやりを込めて読んでください: ${text}` }] }],
+    generationConfig: {
+      responseModalities: ["AUDIO"],
+      speechConfig: {
+        voiceConfig: {
+          prebuiltVoiceConfig: {
+            voiceName: "Aoede" // 落ち着いた女性的な声質を設定
+          }
+        }
+      }
+    },
+    model: "gemini-2.5-flash-preview-tts"
+  };
+
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+
+    if (!response.ok) throw new Error("音声の生成に失敗しました");
+    const data = await response.json();
+    
+    const inlineData = data.candidates?.[0]?.content?.parts?.[0]?.inlineData;
+    if (inlineData) {
+      const mimeType = inlineData.mimeType;
+      const base64Data = inlineData.data;
+      
+      const rateMatch = mimeType.match(/rate=(\d+)/);
+      const sampleRate = rateMatch ? parseInt(rateMatch[1], 10) : 24000;
+      
+      const wavBlob = pcmToWav(base64Data, sampleRate);
+      const audioUrl = URL.createObjectURL(wavBlob);
+      const audio = new Audio(audioUrl);
+      
+      audio.onended = () => {
+         setSpeaking(false);
+         URL.revokeObjectURL(audioUrl);
+      };
+      audio.play();
+    } else {
+       setSpeaking(false);
+    }
+  } catch (error) {
+    console.error("TTS API Error:", error);
+    alert("音声の再生中にエラーが発生しました。");
+    setSpeaking(false);
+  }
+};
+
+// --- Gemini API 呼び出し用の共通関数 (テキスト生成用) ---
+const callGemini = async (prompt, systemInstruction) => {
+  const apiKey = ""; 
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
+  
+  const payload = {
+    contents: [{ parts: [{ text: prompt }] }],
+    systemInstruction: { parts: [{ text: systemInstruction }] }
+  };
+
+  const delays = [1000, 2000, 4000, 8000, 16000];
+  
+  for (let i = 0; i <= delays.length; i++) {
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (!response.ok) throw new Error(`HTTP error: ${response.status}`);
+      const data = await response.json();
+      return data.candidates?.[0]?.content?.parts?.[0]?.text || "応答を生成できませんでした。";
+    } catch (error) {
+      if (i === delays.length) return "通信エラーが発生しました。しばらく経ってからもう一度お試しください。";
+      await new Promise(res => setTimeout(res, delays[i]));
+    }
+  }
+};
+
+
+export default function App() {
+  const [activeTab, setActiveTab] = useState('home');
+  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
+  const [encouragement, setEncouragement] = useState('');
+  
+  // 励ましの言葉リスト
+  const encouragements = [
+    "今日も一日お疲れ様！あなたの頑張りは、必ず誰かが見てくれていますよ。",
+    "深呼吸して、肩の力を抜きましょう。完璧じゃなくても、大丈夫。",
+    "焦らなくて平気。自分のペースで、一歩ずつ進んでいきましょう！",
+    "ミスは挑戦した証拠です。次に活かせば大成功へのステップになりますよ。",
+    "いつもチームを支えてくれてありがとう！週末は美味しいものを食べて休んでね。",
+    "「わからない」と言えるのは勇気がある証拠。どんどん周りを頼ってね！",
+    "あなたの笑顔が、職場の雰囲気を明るくしてくれていますよ。ありがとう！",
+    "今は大変かもしれないけれど、1年後にはきっと「こんなこともあったな」と笑えますよ。"
+  ];
+
+  const handleEncouragement = () => {
+    const randomIndex = Math.floor(Math.random() * encouragements.length);
+    setEncouragement(encouragements[randomIndex]);
+  };
+
+  // タブ切り替え用の共通レイアウト
+  const Layout = ({ children }) => (
+    <div className="min-h-screen bg-slate-50 flex flex-col md:flex-row font-sans text-slate-800">
+      {/* モバイル用ヘッダー */}
+      <div className="md:hidden bg-white shadow-sm p-4 flex justify-between items-center">
+        <h1 className="text-xl font-bold text-teal-600 flex items-center gap-2">
+          <BookOpen className="w-6 h-6" /> 職場の知恵袋
+        </h1>
+        <button onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)} className="p-2 text-slate-600">
+          {isMobileMenuOpen ? <X className="w-6 h-6" /> : <Menu className="w-6 h-6" />}
+        </button>
+      </div>
+
+      {/* サイドバー */}
+      <nav className={`${isMobileMenuOpen ? 'block' : 'hidden'} md:block w-full md:w-64 bg-white shadow-lg md:min-h-screen z-10`}>
+        <div className="p-6 hidden md:block border-b border-slate-100">
+          <h1 className="text-2xl font-bold text-teal-600 flex items-center gap-2">
+            <BookOpen className="w-7 h-7" />
+            職場の知恵袋
+          </h1>
+          <p className="text-xs text-slate-500 mt-2">若手社員のためのサポートツール</p>
+        </div>
+        <div className="p-4 space-y-2">
+          <NavButton id="home" icon={Smile} label="ホーム" />
+          <NavButton id="consult" icon={MessageCircle} label="AIお悩み相談室" />
+          <NavButton id="docSupport" icon={FileText} label="AI文書サポート" />
+          <NavButton id="relation" icon={Users} label="人間関係アシスト" />
+          <NavButton id="jargon" icon={Info} label="社内用語翻訳AI" />
+          <NavButton id="qna" icon={BookOpen} label="知恵袋Q&A・コツ" />
+        </div>
+      </nav>
+
+      {/* メインコンテンツ */}
+      <main className="flex-1 p-4 md:p-8 overflow-y-auto w-full max-w-5xl mx-auto">
+        {children}
+      </main>
+    </div>
+  );
+
+  const NavButton = ({ id, icon: Icon, label }) => (
+    <button
+      onClick={() => { setActiveTab(id); setIsMobileMenuOpen(false); }}
+      className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all duration-200 text-left ${
+        activeTab === id 
+          ? 'bg-teal-50 text-teal-700 font-semibold shadow-sm' 
+          : 'text-slate-600 hover:bg-slate-50 hover:text-teal-600'
+      }`}
+    >
+      <Icon className={`w-5 h-5 ${activeTab === id ? 'text-teal-600' : 'text-slate-400'}`} />
+      {label}
+    </button>
+  );
+
+  return (
+    <Layout>
+      {activeTab === 'home' && (
+        <HomeTab 
+          onEncourage={handleEncouragement} 
+          encouragement={encouragement} 
+          setActiveTab={setActiveTab} // setActiveTab関数をHomeTabに渡す
+        />
+      )}
+      {activeTab === 'consult' && <ConsultTab />}
+      {activeTab === 'docSupport' && <DocSupportTab />}
+      {activeTab === 'relation' && <RelationAssistTab />}
+      {activeTab === 'jargon' && <JargonTab />}
+      {activeTab === 'qna' && <QnATab />}
+    </Layout>
+  );
+}
+
+// --- ホームタブ ---
+const HomeTab = ({ onEncourage, encouragement, setActiveTab }) => {
+  const [isSpeaking, setIsSpeaking] = useState(false);
+
+  const handlePlaySpeech = () => {
+    if (!encouragement || isSpeaking) return;
+    playSpeech(encouragement, setIsSpeaking);
+  };
+
+  return (
+    <div className="space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-500">
+      <div className="bg-gradient-to-br from-teal-500 to-emerald-400 rounded-3xl p-8 text-white shadow-lg text-center md:text-left">
+        <h2 className="text-3xl font-bold mb-4">今日も一日、お疲れ様です！</h2>
+        <p className="text-teal-50 opacity-90 leading-relaxed mb-6">
+          「職場の知恵袋」は、あなたが職場で心地よく、自分らしく働けるようにサポートするAIツールです。<br className="hidden md:block"/>
+          言いにくいこと、分からないこと、なんでもAIに頼ってくださいね。
+        </p>
+        <div className="bg-white/20 p-4 rounded-xl inline-block">
+          <p className="text-sm font-medium mb-2 flex items-center justify-center md:justify-start gap-2">
+            <Heart className="w-4 h-4" /> 今のあなたへ
+          </p>
+          <button 
+            onClick={onEncourage}
+            className="bg-white text-teal-600 font-bold py-3 px-6 rounded-full shadow-md hover:shadow-lg hover:scale-105 transition-all duration-200"
+          >
+            癒しの言葉をもらう ✨
+          </button>
+        </div>
+      </div>
+
+      {encouragement && (
+        <div className="bg-orange-50 border border-orange-200 p-6 rounded-2xl shadow-sm flex flex-col md:flex-row items-start md:items-center gap-4 animate-in zoom-in duration-300">
+          <div className="flex items-start gap-4 flex-1">
+            <div className="bg-orange-100 p-3 rounded-full text-orange-500 shrink-0">
+              <Smile className="w-8 h-8" />
+            </div>
+            <div>
+              <h3 className="font-bold text-orange-800 mb-2">今日のメッセージ</h3>
+              <p className="text-orange-700 leading-relaxed text-lg">{encouragement}</p>
+            </div>
+          </div>
+          {/* 音声読み上げボタン */}
+          <button
+            onClick={handlePlaySpeech}
+            disabled={isSpeaking}
+            className={`mt-4 md:mt-0 shrink-0 flex items-center gap-2 px-4 py-2 rounded-full font-bold transition-all ${
+              isSpeaking 
+                ? 'bg-orange-200 text-orange-500 cursor-not-allowed' 
+                : 'bg-orange-500 text-white hover:bg-orange-600 shadow-sm hover:shadow-md'
+            }`}
+          >
+            {isSpeaking ? <Loader2 className="w-5 h-5 animate-spin" /> : <Volume2 className="w-5 h-5" />}
+            {isSpeaking ? '読み上げ中...' : '音声で聞く'}
+          </button>
+        </div>
+      )}
+
+      {/* ホーム画面のメニューボタン群 (クリックで各タブへ遷移) */}
+      <div className="grid md:grid-cols-2 gap-6">
+        
+        {/* AIお悩み相談室 ボタン */}
+        <button 
+          onClick={() => setActiveTab('consult')}
+          className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100 hover:shadow-md hover:border-teal-300 hover:-translate-y-1 transition-all text-left group"
+        >
+          <h3 className="font-bold text-slate-800 flex items-center gap-2 mb-3 group-hover:text-teal-600 transition-colors">
+            <MessageCircle className="w-5 h-5 text-teal-500" /> AIお悩み相談室
+          </h3>
+          <p className="text-slate-600 text-sm mb-4">仕事の不安や人間関係、上司への対応など、AI先輩に何でも相談できます。</p>
+        </button>
+
+        {/* AI文書サポート ボタン */}
+        <button 
+          onClick={() => setActiveTab('docSupport')}
+          className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100 hover:shadow-md hover:border-blue-300 hover:-translate-y-1 transition-all text-left group"
+        >
+          <h3 className="font-bold text-slate-800 flex items-center gap-2 mb-3 group-hover:text-blue-600 transition-colors">
+            <FileText className="w-5 h-5 text-blue-500" /> AI文書サポート
+          </h3>
+          <p className="text-slate-600 text-sm mb-4">報告書の添削、チャットのトーン調整、謝罪文の作成など、文章作成を助けます。</p>
+        </button>
+
+        {/* 人間関係アシスト ボタン (新規追加) */}
+        <button 
+          onClick={() => setActiveTab('relation')}
+          className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100 hover:shadow-md hover:border-amber-300 hover:-translate-y-1 transition-all text-left group"
+        >
+          <h3 className="font-bold text-slate-800 flex items-center gap-2 mb-3 group-hover:text-amber-600 transition-colors">
+            <Users className="w-5 h-5 text-amber-500" /> 人間関係アシスト
+          </h3>
+          <p className="text-slate-600 text-sm mb-4">雑談の話題探しや、同僚への感謝のメッセージ作成をAIがサポートします。</p>
+        </button>
+
+        {/* 社内用語翻訳AI ボタン (新規追加) */}
+        <button 
+          onClick={() => setActiveTab('jargon')}
+          className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100 hover:shadow-md hover:border-purple-300 hover:-translate-y-1 transition-all text-left group"
+        >
+          <h3 className="font-bold text-slate-800 flex items-center gap-2 mb-3 group-hover:text-purple-600 transition-colors">
+            <Info className="w-5 h-5 text-purple-500" /> 社内用語翻訳AI
+          </h3>
+          <p className="text-slate-600 text-sm mb-4">今さら聞けない社内の専門用語や略語を、若手向けに分かりやすく解説します。</p>
+        </button>
+
+      </div>
+    </div>
+  );
+};
+
+
+// --- AIお悩み相談室 ---
+const ConsultTab = () => {
+  const [input, setInput] = useState('');
+  const [response, setResponse] = useState('');
+  const [loading, setLoading] = useState(false);
+
+  const handleAsk = async () => {
+    if (!input.trim()) return;
+    setLoading(true);
+    setResponse('');
+    const systemPrompt = `あなたは職場の頼りになる、優しくて思いやりのある「AI先輩」です。
+対象ユーザーは新入社員から入社10年目までの若手・中堅社員です。
+ユーザーの悩みに対して、以下の点に注意して回答してください。
+1. まずは相手の状況や感情に深く共感し、肯定すること（例：「それは大変でしたね」「よく頑張っていますね」）。
+2. 上司への対応のアドバイスや、同僚と仲良くなる方法・コミュニケーションのコツを適宜織り交ぜること。
+3. 説教くさくならず、具体的で明日からすぐ実践できる小さなアクションを提案すること。
+4. 長文になる場合は適宜箇条書きを使用して読みやすくすること。
+5. 最後は必ずポジティブに励まして終わること。`;
+    
+    const result = await callGemini(input, systemPrompt);
+    setResponse(result);
+    setLoading(false);
+  };
+
+  return (
+    <div className="max-w-3xl mx-auto space-y-6 animate-in fade-in duration-500">
+      <div className="bg-white p-6 md:p-8 rounded-3xl shadow-sm border border-slate-100">
+        <h2 className="text-2xl font-bold text-slate-800 mb-2 flex items-center gap-2">
+          <MessageCircle className="text-teal-500" /> AIお悩み相談室
+        </h2>
+        <p className="text-slate-500 mb-6">今の不安や「これってどうすればいい？」を自由に書いてください。AI先輩が優しく答えます。</p>
+        
+        <textarea
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          placeholder="例：上司にミスを報告しないといけないのですが、怒られそうで怖くて言えません。どう伝えればいいでしょうか？"
+          className="w-full h-40 p-4 bg-slate-50 border border-slate-200 rounded-2xl focus:ring-2 focus:ring-teal-500 focus:border-teal-500 transition-all resize-none"
+        />
+        
+        <div className="mt-4 flex justify-end">
+          <button
+            onClick={handleAsk}
+            disabled={loading || !input.trim()}
+            className="bg-teal-600 hover:bg-teal-700 disabled:bg-slate-300 text-white font-bold py-3 px-6 rounded-full shadow-sm transition-all flex items-center gap-2"
+          >
+            {loading ? <RefreshCw className="w-5 h-5 animate-spin" /> : <Send className="w-5 h-5" />}
+            AI先輩に相談する
+          </button>
+        </div>
+      </div>
+
+      {response && (
+        <div className="bg-teal-50 p-6 md:p-8 rounded-3xl border border-teal-100 shadow-sm animate-in slide-in-from-bottom-4 duration-500">
+          <div className="flex items-center gap-3 mb-4">
+            <div className="bg-teal-600 p-2 rounded-full text-white">
+              <Smile className="w-6 h-6" />
+            </div>
+            <h3 className="font-bold text-teal-900 text-lg">AI先輩からのアドバイス</h3>
+          </div>
+          <div className="prose prose-teal max-w-none whitespace-pre-wrap text-slate-700 leading-relaxed">
+            {response}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// --- AI文書サポート ---
+const DocSupportTab = () => {
+  const [mode, setMode] = useState('report');
+  const [input, setInput] = useState('');
+  const [response, setResponse] = useState('');
+  const [loading, setLoading] = useState(false);
+
+  const modes = {
+    report: {
+      title: "上司への報告シミュレーター",
+      desc: "箇条書きや思いついたままの状況を入力すると、上司へ報告するための適切なビジネス文書に添削・整形します。",
+      placeholder: "例：\n・A社の案件でトラブル発生\n・納品が2日遅れる\n・先方にはまだ連絡してない\n・どうすればいいか相談したい",
+      systemPrompt: "ユーザーが入力した情報を元に、上司へ報告するための適切で分かりやすいビジネス文書（メールまたはチャット用）を作成してください。結論から述べ、事実と意見を分け、上司が判断しやすいように選択肢や相談事項を明確にしてください。なぜその表現が良いのかの簡単な解説も添えてください。"
+    },
+    tone: {
+      title: "AIトーンチェンジャー",
+      desc: "先輩や他部署へのチャット・メール文面を、失礼のない柔らかい表現や、より伝わりやすい構成に自動推敲します。",
+      placeholder: "例：明日の会議の資料、まだもらってないんですけど、いつになりますか？早くしてください。",
+      systemPrompt: "ユーザーが入力した文章を、職場の先輩や他部署の人に送っても失礼のない、柔らかく丁寧で円滑なコミュニケーションを促す表現（クッション言葉などを使用）に書き換えてください。ビジネスチャットで使いやすい適度なカジュアルさも含めた案と、少しフォーマルな案の2パターンを提示してください。"
+    },
+    apology: {
+      title: "謝罪・お願い文ジェネレーター",
+      desc: "言いにくい依頼や、ミスをした際のお詫び文のドラフトを作成し、心理的負担を軽減します。",
+      placeholder: "例：見積書の金額を間違えてお客様に送ってしまった。上司に謝って、一緒にお客様に謝罪に行ってほしいとお願いしたい。",
+      systemPrompt: "ユーザーの状況に基づき、心理的負担を軽減するための謝罪文またはお願い文のドラフトを作成してください。誠意が伝わり、かつ建設的に次に進めるような文面にしてください。送る際の心構えや、口頭でフォローすべきポイントのアドバイスも少し添えてください。"
+    }
+  };
+
+  const handleGenerate = async () => {
+    if (!input.trim()) return;
+    setLoading(true);
+    setResponse('');
+    const result = await callGemini(input, modes[mode].systemPrompt);
+    setResponse(result);
+    setLoading(false);
+  };
+
+  return (
+    <div className="max-w-4xl mx-auto space-y-6 animate-in fade-in duration-500">
+      <div className="bg-white p-6 md:p-8 rounded-3xl shadow-sm border border-slate-100">
+        <div className="flex flex-col md:flex-row md:items-center justify-between mb-6 gap-4">
+          <h2 className="text-2xl font-bold text-slate-800 flex items-center gap-2">
+            <FileText className="text-blue-500" /> AI文書サポート
+          </h2>
+          <select 
+            value={mode} 
+            onChange={(e) => { setMode(e.target.value); setResponse(''); setInput(''); }}
+            className="bg-blue-50 border border-blue-200 text-blue-800 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 block p-2.5 font-medium"
+          >
+            <option value="report">📝 報告シミュレーター</option>
+            <option value="tone">✨ トーンチェンジャー</option>
+            <option value="apology">🙇‍♂️ 謝罪・お願い文作成</option>
+          </select>
+        </div>
+        
+        <div className="bg-blue-50 p-4 rounded-xl mb-6 flex items-start gap-3">
+          <Info className="w-5 h-5 text-blue-500 shrink-0 mt-0.5" />
+          <p className="text-blue-800 text-sm">{modes[mode].desc}</p>
+        </div>
+
+        <textarea
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          placeholder={modes[mode].placeholder}
+          className="w-full h-40 p-4 bg-slate-50 border border-slate-200 rounded-2xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all resize-none"
+        />
+        
+        <div className="mt-4 flex justify-end">
+          <button
+            onClick={handleGenerate}
+            disabled={loading || !input.trim()}
+            className="bg-blue-600 hover:bg-blue-700 disabled:bg-slate-300 text-white font-bold py-3 px-6 rounded-full shadow-sm transition-all flex items-center gap-2"
+          >
+            {loading ? <RefreshCw className="w-5 h-5 animate-spin" /> : <SparklesIcon />}
+            文章を生成する
+          </button>
+        </div>
+      </div>
+
+      {response && (
+        <div className="bg-white p-6 md:p-8 rounded-3xl border border-blue-100 shadow-md animate-in slide-in-from-bottom-4 duration-500 relative overflow-hidden">
+          <div className="absolute top-0 left-0 w-2 h-full bg-blue-500"></div>
+          <h3 className="font-bold text-slate-800 text-lg mb-4 flex items-center gap-2">
+            <SparklesIcon className="text-blue-500" /> 生成結果・アドバイス
+          </h3>
+          <div className="prose prose-blue max-w-none whitespace-pre-wrap text-slate-700">
+            {response}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+const SparklesIcon = ({ className }) => (
+  <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
+    <path d="Mm12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z"/>
+    <path d="M5 3v4"/><path d="M19 17v4"/><path d="M3 5h4"/><path d="M17 19h4"/>
+  </svg>
+);
+
+// --- 人間関係アシスト ---
+const RelationAssistTab = () => {
+  const [mode, setMode] = useState('smalltalk');
+  const [input, setInput] = useState('');
+  const [response, setResponse] = useState('');
+  const [loading, setLoading] = useState(false);
+
+  const modes = {
+    smalltalk: {
+      title: "雑談ネタジェネレーター",
+      icon: Coffee,
+      color: "amber",
+      desc: "相手の情報やシチュエーションを入力すると、気まずい空気を打破する気の利いた雑談ネタを提案します。",
+      placeholder: "例：50代の営業部長。ゴルフと犬が好き。エレベーターで2人きりになった時。",
+      systemPrompt: "ユーザーが入力した相手の特徴やシチュエーションに合わせて、ビジネスの場で使いやすい、少し気の利いた雑談の話題（アイスブレイク）を3つ提案してください。それぞれ、どのように話を切り出せばいいかの「具体的なセリフ例（鍵括弧付き）」も添えてください。天気以外の話題を推奨します。"
+    },
+    praise: {
+      title: "感謝・ほめ言葉アシスト",
+      icon: Gift,
+      color: "rose",
+      desc: "同僚の素晴らしい行動や助けてもらったことを入力すると、チャットで送りやすい温かい感謝のメッセージを作成します。",
+      placeholder: "例：同期の田中さん。昨日の会議で、私の代わりにプロジェクターの準備や資料の配布を率先してやってくれた。",
+      systemPrompt: "ユーザーが入力した相手の行動に対して、社内チャットや直接口頭で伝えるための、温かみがあり感謝がしっかり伝わるメッセージを生成してください。相手の行動がどのように助かったか（価値）を強調してください。少しカジュアルなパターンと、しっかり丁寧なパターンの2つを提示してください。"
+    }
+  };
+
+  const handleGenerate = async () => {
+    if (!input.trim()) return;
+    setLoading(true);
+    setResponse('');
+    const result = await callGemini(input, modes[mode].systemPrompt);
+    setResponse(result);
+    setLoading(false);
+  };
+
+  const CurrentIcon = modes[mode].icon;
+
+  return (
+    <div className="max-w-4xl mx-auto space-y-6 animate-in fade-in duration-500">
+      <div className="bg-white p-6 md:p-8 rounded-3xl shadow-sm border border-slate-100">
+        <div className="flex flex-col md:flex-row md:items-center justify-between mb-6 gap-4">
+          <h2 className="text-2xl font-bold text-slate-800 flex items-center gap-2">
+            <Users className="text-amber-500" /> 人間関係アシスト
+          </h2>
+          <select 
+            value={mode} 
+            onChange={(e) => { setMode(e.target.value); setResponse(''); setInput(''); }}
+            className="bg-amber-50 border border-amber-200 text-amber-800 text-sm rounded-lg focus:ring-amber-500 focus:border-amber-500 block p-2.5 font-medium"
+          >
+            <option value="smalltalk">☕ 雑談ネタジェネレーター</option>
+            <option value="praise">🎁 感謝・ほめ言葉アシスト</option>
+          </select>
+        </div>
+        
+        <div className={`bg-${modes[mode].color}-50 p-4 rounded-xl mb-6 flex items-start gap-3`}>
+          <CurrentIcon className={`w-5 h-5 text-${modes[mode].color}-500 shrink-0 mt-0.5`} />
+          <p className={`text-${modes[mode].color}-800 text-sm`}>{modes[mode].desc}</p>
+        </div>
+
+        <textarea
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          placeholder={modes[mode].placeholder}
+          className={`w-full h-40 p-4 bg-slate-50 border border-slate-200 rounded-2xl focus:ring-2 focus:ring-${modes[mode].color}-500 focus:border-${modes[mode].color}-500 transition-all resize-none`}
+        />
+        
+        <div className="mt-4 flex justify-end">
+          <button
+            onClick={handleGenerate}
+            disabled={loading || !input.trim()}
+            className={`bg-${modes[mode].color}-500 hover:bg-${modes[mode].color}-600 disabled:bg-slate-300 text-white font-bold py-3 px-6 rounded-full shadow-sm transition-all flex items-center gap-2`}
+          >
+            {loading ? <RefreshCw className="w-5 h-5 animate-spin" /> : <SparklesIcon />}
+            アイデアを生成する ✨
+          </button>
+        </div>
+      </div>
+
+      {response && (
+        <div className={`bg-white p-6 md:p-8 rounded-3xl border border-${modes[mode].color}-200 shadow-md animate-in slide-in-from-bottom-4 duration-500 relative overflow-hidden`}>
+          <div className={`absolute top-0 left-0 w-2 h-full bg-${modes[mode].color}-500`}></div>
+          <h3 className="font-bold text-slate-800 text-lg mb-4 flex items-center gap-2">
+            <SparklesIcon className={`text-${modes[mode].color}-500`} /> 生成結果
+          </h3>
+          <div className={`prose prose-${modes[mode].color} max-w-none whitespace-pre-wrap text-slate-700`}>
+            {response}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+
+// --- 社内用語翻訳AI ---
+const JargonTab = () => {
+  const [input, setInput] = useState('');
+  const [response, setResponse] = useState('');
+  const [loading, setLoading] = useState(false);
+
+  const handleTranslate = async () => {
+    if (!input.trim()) return;
+    setLoading(true);
+    setResponse('');
+    const systemPrompt = "ユーザーが入力したビジネス用語、略語、またはカタカナ語の意味を、若手社員向けに非常にわかりやすく解説してください。「つまりどういうことか」「どういう文脈で使われるか」「言い換えるならどんな言葉か」を含め、ポップで親しみやすいトーンで回答してください。";
+    const result = await callGemini(input, systemPrompt);
+    setResponse(result);
+    setLoading(false);
+  };
+
+  return (
+    <div className="max-w-2xl mx-auto space-y-6 animate-in fade-in duration-500">
+      <div className="bg-white p-6 md:p-8 rounded-3xl shadow-sm border border-slate-100 text-center">
+        <div className="w-16 h-16 bg-purple-100 text-purple-600 rounded-full flex items-center justify-center mx-auto mb-4">
+          <BookOpen className="w-8 h-8" />
+        </div>
+        <h2 className="text-2xl font-bold text-slate-800 mb-2">社内用語・暗黙の了解翻訳AI</h2>
+        <p className="text-slate-500 mb-8 text-sm">
+          先輩が使っている謎のカタカナ語や略語。今さら「それ何ですか？」と聞けない言葉を入力してください。
+        </p>
+        
+        <div className="flex flex-col sm:flex-row gap-3">
+          <input
+            type="text"
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && handleTranslate()}
+            placeholder="例：アジェンダ、ASAP、なる早、よしなに"
+            className="flex-1 p-4 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-purple-500 focus:border-purple-500 transition-all"
+          />
+          <button
+            onClick={handleTranslate}
+            disabled={loading || !input.trim()}
+            className="bg-purple-600 hover:bg-purple-700 disabled:bg-slate-300 text-white font-bold py-4 px-8 rounded-xl shadow-sm transition-all whitespace-nowrap"
+          >
+            {loading ? <RefreshCw className="w-5 h-5 animate-spin mx-auto" /> : "翻訳する"}
+          </button>
+        </div>
+      </div>
+
+      {response && (
+        <div className="bg-purple-50 p-6 rounded-3xl border border-purple-100 shadow-sm animate-in zoom-in-95 duration-300">
+          <h3 className="font-bold text-purple-900 mb-3">AIの解説</h3>
+          <div className="prose prose-purple text-slate-700 whitespace-pre-wrap">
+            {response}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// --- Q&A・コツ タブ ---
+const QnATab = () => {
+  const qnas = [
+    { q: "宛名の「御中」と「様」の使い分けは？", a: "部署や会社など「組織」宛てなら『御中』、担当者など「個人」宛てなら『様』です。両方を併用する（〇〇株式会社御中 〇〇様）のはNGです。" },
+    { q: "メールのCCとBCC、どう使い分ける？", a: "CCは「参考までに見ておいてほしい人」に入れ、受信者全員にアドレスが見えます。BCCは「他の受信者にアドレスを知られずに共有したい人（または一斉送信時）」に使います。" },
+    { q: "「了解しました」は目上の人に使っていい？", a: "目上の人や取引先にはNGです。「承知いたしました」「かしこまりました」を使うのがビジネスマナーとして安全です。" },
+    { q: "名刺交換の正しい順番と受け取り方は？", a: "「目下（または訪問者）」から先に差し出します。受け取るときは「頂戴いたします」と一言添え、相手の会社のロゴや名前に指がかからないように両手で受け取ります。" },
+    { q: "上座と下座の基本ルールは？", a: "基本は「出入り口から一番遠い席」が上座（偉い人の席）、「一番近い席」が下座（若手の席）です。タクシーの場合は運転席の後ろが上座、助手席が下座になります。" },
+    { q: "稟議書（りんぎしょ）って何？", a: "自分の一存では決められない会社のお金の使い方や契約について、「これで進めてもいいですか？」と複数の上司からハンコ（承認）をもらうための書類のことです。" },
+    { q: "電話を取り次ぐときの正しい伝え方は？", a: "「〇〇会社の△△様からお電話です。保留の１番でお待ちです」と、相手の社名・名前・保留番号の３点をセットで伝えるとスムーズです。" },
+    { q: "有給休暇を申請するときのマナーは？", a: "権利なので理由は「私用のため」でOKです。ただし、業務に支障が出ないよう早め（できれば1ヶ月前〜遅くとも1週間前）に上司に相談・申請するのがマナーです。" },
+    { q: "チャット（Slack/Teams等）でのメンションのマナーは？", a: "急ぎでない限り、深夜や休日のメンションは控えましょう。また、「〇〇さん、お疲れ様です。」だけでなく、要件を１つのメッセージにまとめて送ると親切です。" },
+    { q: "飲み会でのお酌やグラスの高さの正解は？", a: "ビールはラベルを上にして注ぎます。乾杯の時は、目上の人より少し自分のグラスを低い位置に当てて乾杯するのが基本のマナーです。" }
+  ];
+
+  return (
+    <div className="space-y-8 animate-in fade-in duration-500 max-w-4xl mx-auto">
+      
+      {/* コミュニケーションのコツ セクション */}
+      <section>
+        <h2 className="text-2xl font-bold text-slate-800 mb-6 flex items-center gap-2">
+          <Heart className="text-pink-500" /> 円滑なコミュニケーションのコツ
+        </h2>
+        <div className="grid md:grid-cols-2 gap-6">
+          <div className="bg-pink-50 p-6 rounded-3xl border border-pink-100">
+            <h3 className="font-bold text-pink-800 mb-4 text-lg border-b border-pink-200 pb-2">上司への対応のアドバイス</h3>
+            <ul className="space-y-3 text-slate-700">
+              <li className="flex items-start gap-2"><span className="text-pink-500 font-bold">1.</span> 報告は「結論」から。ダラダラ経緯を話すより伝わります。</li>
+              <li className="flex items-start gap-2"><span className="text-pink-500 font-bold">2.</span> 相談は「A案とB案どちらが良いか」など、自分なりの仮説を持っていくと喜ばれます。</li>
+              <li className="flex items-start gap-2"><span className="text-pink-500 font-bold">3.</span> 話しかける時は「〇〇の件で3分よろしいですか？」と時間を区切るとスムーズです。</li>
+            </ul>
+          </div>
+          <div className="bg-orange-50 p-6 rounded-3xl border border-orange-100">
+            <h3 className="font-bold text-orange-800 mb-4 text-lg border-b border-orange-200 pb-2">同僚と仲良くなる方法</h3>
+            <ul className="space-y-3 text-slate-700">
+              <li className="flex items-start gap-2"><span className="text-orange-500 font-bold">1.</span> 挨拶に「＋αの一言（今日は寒いですね等）」を添えてみる。</li>
+              <li className="flex items-start gap-2"><span className="text-orange-500 font-bold">2.</span> 相手の業務の「小さな変化や工夫」に気づいて具体的に褒める。</li>
+              <li className="flex items-start gap-2"><span className="text-orange-500 font-bold">3.</span> 助けてもらったら、少し大げさくらいに感謝と喜びを伝える。</li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      {/* 今さら聞けないQ&A セクション */}
+      <section className="bg-white p-6 md:p-8 rounded-3xl shadow-sm border border-slate-100">
+        <h2 className="text-2xl font-bold text-slate-800 mb-2 flex items-center gap-2">
+          <BookOpen className="text-teal-500" /> 今さら聞けないQ&A 10選
+        </h2>
+        <p className="text-slate-500 mb-6">入社して少し経つと、基礎すぎて逆に聞きづらいことってありますよね。ここでこっそり確認しましょう。</p>
+        
+        <div className="space-y-3">
+          {qnas.map((item, index) => (
+            <QnAItem key={index} q={item.q} a={item.a} index={index + 1} />
+          ))}
+        </div>
+      </section>
+    </div>
+  );
+};
+
+const QnAItem = ({ q, a, index }) => {
+  const [isOpen, setIsOpen] = useState(false);
+  return (
+    <div className="border border-slate-200 rounded-xl overflow-hidden transition-all duration-200">
+      <button 
+        onClick={() => setIsOpen(!isOpen)}
+        className="w-full bg-slate-50 hover:bg-teal-50 p-4 flex items-center justify-between text-left transition-colors"
+      >
+        <span className="font-bold text-slate-700 flex items-center gap-3">
+          <span className="bg-teal-100 text-teal-700 text-xs w-6 h-6 flex items-center justify-center rounded-full shrink-0">Q{index}</span>
+          {q}
+        </span>
+        {isOpen ? <ChevronUp className="w-5 h-5 text-slate-400 shrink-0" /> : <ChevronDown className="w-5 h-5 text-slate-400 shrink-0" />}
+      </button>
+      {isOpen && (
+        <div className="p-4 bg-white border-t border-slate-100 text-slate-600 leading-relaxed text-sm animate-in slide-in-from-top-2 duration-200">
+          <span className="font-bold text-teal-600 mr-2">A.</span>{a}
+        </div>
+      )}
+    </div>
+  );
+};
